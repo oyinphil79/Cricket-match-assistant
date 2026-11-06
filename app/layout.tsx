@@ -4,8 +4,8 @@ import { GeistMono } from "geist/font/mono";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Cricket match assistant",
-  description: "Live cricket answers with every tool call shown.",
+  title: "HR policy assistant",
+  description: "Ask about leave, travel and benefits. Answers cite the handbook section and page.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

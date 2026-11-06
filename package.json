@@ -1,5 +1,5 @@
 {
-  "name": "cricket-match-assistant",
+  "name": "hr-policy-assistant",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -15,16 +15,13 @@
     "openai": "^7.53.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "unpdf": "^1.9.1"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.4",
-    "@tailwindcss/typography": "^0.5.20",
+    "@tailwindcss/turbopack": "^4.3.4",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "postcss": "^8.5.32",
     "tailwindcss": "^4.3.4",
     "typescript": "5.9"
   }

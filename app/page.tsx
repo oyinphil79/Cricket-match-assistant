@@ -1,115 +1,147 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Plus } from "lucide-react";
-import EmptyState from "@/components/EmptyState";
-import KeyBar, { type Keys } from "@/components/KeyBar";
-import MessageBox from "@/components/MessageBox";
-import ModelSwitch from "@/components/ModelSwitch";
-import Thread from "@/components/Thread";
-import { DEFAULT_MODEL, type ModelId } from "@/lib/presets";
-import { readEvents } from "@/lib/stream";
-import type { AssistantMessage, ChatMessage, HistoryTurn, StreamEvent } from "@/lib/types";
+import AnswerCard from "@/components/AnswerCard";
+import AskBar from "@/components/AskBar";
+import ChunkList from "@/components/ChunkList";
+import LiveBar from "@/components/LiveBar";
+import PageWall from "@/components/PageWall";
+import { ApiError, KEY_STORAGE, post } from "@/lib/client";
+import { checkFiles } from "@/lib/limits";
+import { DEFAULT_MODEL, MODELS, type ModelId } from "@/lib/models";
+import { samplePages, SAMPLES } from "@/lib/samples";
+import type { Answer, Chunk, IndexedChunk, Page, Scored, StepId, StepState, Steps } from "@/lib/types";
 
-const STORE = { openai: "openai-key", serpapi: "serpapi-key" } as const;
-const uid = () => Math.random().toString(36).slice(2);
+type Source = { kind: "sample"; id: string } | { kind: "upload"; files: File[] };
 
-function apply(m: AssistantMessage, e: StreamEvent): AssistantMessage {
-  switch (e.type) {
-    case "status": return { ...m, steps: [...m.steps, e.text] };
-    case "tool_start": return { ...m, calls: [...m.calls, { id: e.id, name: e.name, args: e.args }] };
-    case "tool_end": return { ...m, calls: m.calls.map((c) => (c.id === e.id ? { ...c, ms: e.ms, result: e.result, error: e.error } : c)) };
-    case "answer": return { ...m, answer: e.text };
-    case "error": return { ...m, state: "error", error: e.message };
-    case "done": return { ...m, state: "done" };
-  }
-}
+const IDLE: Steps = {
+  read: { state: "wait", note: "pages → chunks" },
+  embed: { state: "wait", note: "chunks → vectors" },
+  search: { state: "wait", note: "cosine, top 4" },
+  answer: { state: "wait", note: "cited reply" },
+};
+const sourceKey = (s: Source) => (s.kind === "sample" ? s.id : s.files.map((f) => `${f.name}:${f.size}`).join("|"));
+const strip = ({ vector: _, ...c }: IndexedChunk): Chunk => c; // the answer step doesn't need vectors
 
-export default function Page() {
-  const [keys, setKeys] = useState<Keys>({ openai: "", serpapi: "" });
-  const [serpOnServer, setSerpOnServer] = useState(false);
+export default function Home() {
+  const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState<ModelId>(DEFAULT_MODEL);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [source, setSource] = useState<Source>({ kind: "sample", id: SAMPLES[0].id });
+  const [question, setQuestion] = useState(SAMPLES[0].question); // first preset pre-filled
+  const [pages, setPages] = useState<Page[]>(() => samplePages(SAMPLES[0]));
+  const [chunks, setChunks] = useState<Chunk[]>([]);
+  const [ranked, setRanked] = useState<Scored[]>([]);
+  const [top, setTop] = useState<number[]>([]);
+  const [result, setResult] = useState<Answer | null>(null);
+  const [steps, setSteps] = useState<Steps>(IDLE);
+  const [reading, setReading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const abort = useRef<AbortController | null>(null);
-  const bottom = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState("");
+  const [keyError, setKeyError] = useState("");
+  // The index (chunks + vectors) stays in the browser, so follow-up questions skip embedding.
+  const indexes = useRef(new Map<string, { pages: Page[]; index: IndexedChunk[] }>());
 
-  useEffect(() => {
-    try {
-      setKeys({ openai: sessionStorage.getItem(STORE.openai) ?? "", serpapi: sessionStorage.getItem(STORE.serpapi) ?? "" });
-    } catch { /* storage blocked */ }
-    fetch("/api/research").then((r) => r.json()).then((d) => setSerpOnServer(Boolean(d?.serpapiOnServer))).catch(() => {});
-  }, []);
-  useEffect(() => { bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages]);
+  // The key lives in sessionStorage only: gone when the tab closes, never sent anywhere but our API.
+  useEffect(() => { try { setApiKey(sessionStorage.getItem(KEY_STORAGE) ?? ""); } catch { /* storage blocked */ } }, []);
+  function saveKey(k: string) {
+    setApiKey(k); setKeyError("");
+    try { if (k) sessionStorage.setItem(KEY_STORAGE, k); else sessionStorage.removeItem(KEY_STORAGE); } catch { /* ignore */ }
+  }
 
-  const ready = Boolean(keys.openai && (keys.serpapi || serpOnServer));
-  const saveKeys = (k: Keys) => {
-    setKeys(k);
+  function reset(next: Source, nextPages: Page[]) {
+    setSource(next); setPages(nextPages); setChunks([]); setRanked([]); setTop([]);
+    setResult(null); setSteps(IDLE); setError("");
+  }
+  function pickPreset(id: string) {
+    const s = SAMPLES.find((x) => x.id === id)!;
+    const cached = indexes.current.get(id);
+    reset({ kind: "sample", id }, samplePages(s));
+    if (cached) setChunks(cached.index.map(strip));
+    setQuestion(s.question);
+  }
+  function pickFiles(files: File[]) {
+    const problem = checkFiles(files);
+    if (problem) return setError(problem);
+    reset({ kind: "upload", files }, []);
+    setQuestion("");
+  }
+
+  async function run() {
+    if (busy || !question.trim()) return;
+    const mark = (id: StepId, state: StepState, note?: string) =>
+      setSteps((s) => ({ ...s, [id]: { state, note: note ?? s[id].note } }));
+    setBusy(true); setError(""); setKeyError(""); setResult(null); setRanked([]); setTop([]);
+    setSteps(IDLE);
     try {
-      for (const name of ["openai", "serpapi"] as const) {
-        if (k[name]) sessionStorage.setItem(STORE[name], k[name]); else sessionStorage.removeItem(STORE[name]);
+      const key = sourceKey(source);
+      let cached = indexes.current.get(key);
+      if (!cached) {
+        // 1. Read the pages, then cut them into chunks.
+        mark("read", "run", "reading pages"); setReading(true); setChunks([]);
+        const body = source.kind === "sample" ? { sample: source.id } : toForm(source.files);
+        const { pages } = await post<{ pages: Page[] }>("/api/read", body, apiKey);
+        setPages(pages); setReading(false);
+        const { chunks } = await post<{ chunks: Chunk[] }>("/api/chunk", { pages }, apiKey);
+        setChunks(chunks);
+        mark("read", "done", `${pages.length} pages · ${chunks.length} chunks`);
+        // 2. Embed every chunk. The result is the whole index.
+        mark("embed", "run", `embedding ${chunks.length} chunks`);
+        const r = await post<{ index: IndexedChunk[]; tokens: number }>("/api/embed", { chunks }, apiKey);
+        cached = { pages, index: r.index };
+        indexes.current.set(key, cached);
+        mark("embed", "done", `${r.index.length} vectors · ${r.tokens.toLocaleString()} tokens`);
+      } else {
+        setPages(cached.pages); setChunks(cached.index.map(strip));
+        mark("read", "done", `${cached.pages.length} pages · ${cached.index.length} chunks`);
+        mark("embed", "done", `${cached.index.length} vectors · kept in tab`);
       }
-    } catch { /* storage blocked */ }
-  };
+      const index = cached.index;
 
-  const update = (id: string, fn: (m: AssistantMessage) => AssistantMessage) =>
-    setMessages((all) => all.map((m) => (m.id === id && m.role === "assistant" ? fn(m) : m)));
+      // 3. Embed the question and score every chunk against it.
+      mark("search", "run", "scoring every chunk");
+      const s = await post<{ ranked: Scored[]; top: number[] }>("/api/search", { question, index }, apiKey);
+      setRanked(s.ranked); setTop(s.top);
+      mark("search", "done", `top ${s.top.length} of ${index.length} · best ${s.ranked[0].score.toFixed(2)}`);
 
-  async function send(text: string) {
-    if (busy || !ready) return;
-    const history: HistoryTurn[] = messages.flatMap((m): HistoryTurn[] =>
-      m.role === "user" ? [{ role: "user", content: m.text }] : m.answer ? [{ role: "assistant", content: m.answer }] : []);
-    const id = uid();
-    setMessages((all) => [...all, { id: uid(), role: "user", text }, { id, role: "assistant", state: "running", steps: [], calls: [] }]);
-    setBusy(true);
-    const ctrl = new AbortController();
-    abort.current = ctrl;
-    try {
-      const res = await fetch("/api/research", {
-        method: "POST", signal: ctrl.signal,
-        headers: {
-          "Content-Type": "application/json",
-          "openai-key": keys.openai,
-          ...(keys.serpapi ? { "serpapi-key": keys.serpapi } : {}),
-        },
-        body: JSON.stringify({ question: text, model, history }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `Request failed (${res.status})`);
-      await readEvents(res, (e) => update(id, (m) => apply(m, e)));
-      update(id, (m) => (m.state === "running" ? { ...m, state: m.answer ? "done" : "error", error: m.answer ? undefined : "The stream ended early." } : m));
-    } catch (err) {
-      update(id, (m) => ctrl.signal.aborted
-        ? { ...m, state: "stopped" }
-        : { ...m, state: "error", error: err instanceof Error ? err.message : "Request failed." });
+      // 4. Only the top chunks go to the model.
+      const label = MODELS.find((m) => m.id === model)!.label;
+      mark("answer", "run", `asking ${label}`);
+      const sent = s.top.map((id) => strip(index.find((c) => c.id === id)!));
+      const a = await post<Answer>("/api/answer", { question, chunks: sent, model }, apiKey);
+      setResult(a);
+      mark("answer", "done", a.covered ? `used ${a.used.length} of ${sent.length} chunks` : "not covered");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Something went wrong.";
+      if (e instanceof ApiError && e.status === 401) setKeyError(msg); else setError(msg);
+      // Put the step that failed back to waiting so the strip shows where it stopped.
+      setSteps((s) => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, v.state === "run" ? IDLE[k as StepId] : v])) as Steps);
     } finally {
-      setBusy(false);
-      abort.current = null;
+      setBusy(false); setReading(false);
     }
   }
 
-  const newChat = () => { abort.current?.abort(); setMessages([]); };
+  const sample = source.kind === "sample" ? SAMPLES.find((x) => x.id === source.id) : undefined;
+  const sourceLabel = sample ? `${sample.title} (sample handbook)` : source.kind === "upload" ? source.files.map((f) => f.name).join(", ") : "";
 
   return (
-    <main className="mx-auto flex min-h-dvh max-w-3xl flex-col px-4">
-      <header className="flex items-center justify-between gap-3 py-5">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <span className="size-2 rounded-full bg-emerald-400" /> Cricket match assistant
-        </div>
-        <div className="flex items-center gap-2">
-          <ModelSwitch value={model} onChange={setModel} disabled={busy} />
-          <button onClick={newChat} className="pill border border-black/5 bg-white text-neutral-700 shadow-sm hover:border-black/15">
-            <Plus className="size-3.5" strokeWidth={1.75} /> New chat
-          </button>
-        </div>
-      </header>
-      <KeyBar keys={keys} serpOnServer={serpOnServer} onChange={saveKeys} />
-      <section className="flex-1 pb-4">
-        {messages.length === 0 ? <EmptyState onPick={send} disabled={!ready} /> : <Thread messages={messages} />}
-        <div ref={bottom} />
-      </section>
-      <footer className="sticky bottom-0 bg-gradient-to-t from-page via-page to-transparent pb-5 pt-6">
-        <MessageBox busy={busy} disabled={!ready} onSend={send} onStop={() => abort.current?.abort()} />
-        <p className="mt-2 text-center text-[11px] text-neutral-400">Scores come from live search results and may be delayed. No betting advice.</p>
-      </footer>
+    <main className="mx-auto max-w-5xl space-y-6 px-4 py-8 sm:py-10">
+      <LiveBar apiKey={apiKey} onKey={saveKey} keyError={keyError} model={model} onModel={setModel} busy={busy} />
+      <AskBar
+        question={question} onQuestion={setQuestion} onAsk={run} busy={busy}
+        activeSample={sample?.id ?? null} onPreset={pickPreset} sourceLabel={sourceLabel} onUpload={pickFiles}
+      />
+      {error && <p className="rounded-xl bg-rose-50 px-4 py-2.5 text-sm text-rose-700">{error}</p>}
+      {result && <AnswerCard result={result} pages={pages} chunks={chunks} modelLabel={MODELS.find((m) => m.id === model)!.label} />}
+      <PageWall
+        pages={pages} pending={source.kind === "upload" ? source.files.map((f) => f.name) : []} reading={reading}
+        steps={steps} chunks={chunks} ranked={ranked} top={top} used={result?.used ?? []}
+      />
+      <ChunkList ranked={ranked} chunks={chunks} top={top} used={result?.used ?? []} />
     </main>
   );
+}
+
+function toForm(files: File[]) {
+  const form = new FormData();
+  files.forEach((f) => form.append("files", f));
+  return form;
 }

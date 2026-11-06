@@ -1,12 +1,41 @@
-# Cricket match assistant
+# HR policy assistant
 
-A small chat app that answers questions about live cricket with real data, and shows every tool call it makes so you can see where each number came from.
+Ask a question about leave, travel or benefits and get a short answer that cites the
+**policy section** and the **page** it came from. Upload your own HR handbook PDFs, or try one
+of the three built-in sample handbooks.
 
-- **Next.js (App Router) + TypeScript + Tailwind**, Geist font, lucide icons
-- **OpenAI** chat completions with function calling
-- **SerpApi** (Google results, `sports_results` block) for live match data
-- Both keys can be entered in the page; the SerpApi key can also live on the server
-- No database, no login
+The point of the project is to practise **chunking and vector search by hand**: there is no
+vector database and no RAG library. The screen is built around the handbook's pages so you
+can watch each step of the search happen.
+
+## How it works
+
+| Step | Route | What happens |
+| --- | --- | --- |
+| 1. Read | `POST /api/read` | `unpdf` turns each PDF page into plain text (samples are already split into pages). |
+| 1. Chunk | `POST /api/chunk` | Each page is cut into ~120-word chunks; each starts 30 words before the last one ended. A chunk never crosses a page, so it always knows its page number. |
+| 2. Embed | `POST /api/embed` | Every chunk goes to OpenAI `text-embedding-3-small` at 768 dimensions. Chunks + vectors are the whole index. It's sent back to the browser and kept there, so a follow-up question doesn't embed the handbook again. |
+| 3. Search | `POST /api/search` | The question is embedded the same way, every chunk is scored with a hand-written cosine similarity, and the top 4 are kept. |
+| 4. Answer | `POST /api/answer` | Only those 4 chunks, numbered, go to the model through the Responses API (low reasoning effort). It returns JSON: the answer, whether the handbook covers it, the section it cites, and which chunks it used. Partly covered questions get a partial answer instead of a refusal. |
+
+The page calls the routes in order. While it runs, the page tiles pulse while being read,
+get one stripe per chunk, turn green by how close their best chunk is to the question, show
+`#1`–`#4` badges for the chunks sent to the model, and a tick on the pages it used.
+
+## Your OpenAI key
+
+The app runs on the visitor's own OpenAI key. Paste it in the bar at the top: it is kept in
+`sessionStorage` (`openai-key`) for that tab only and sent as an `x-openai-key` header on each
+request. The routes use that header first and fall back to `OPENAI_API_KEY` from `.env.local`.
+The key is never logged or stored on the server.
+
+Models: `gpt-5-mini` by default, or `gpt-6.1-sol` (cheaper) from the switch at the top right.
+
+## Limits
+
+To stop one click burning through a quota: at most **3 PDFs**, **4 MB** in total, **40 pages**
+and **150 chunks**. Questions are capped at 500 characters. Scanned PDFs (images of pages)
+have no text and can't be read.
 
 ## Run it
 
@@ -18,42 +47,28 @@ npm install
 npm run dev
 ```
 
-Open http://localhost:3000, enter your OpenAI and SerpApi keys in the key panel and ask a question.
+Open http://localhost:3000, paste your key, and press **Ask**: the first sample question is
+already filled in. Optionally, copy `.env.example` to `.env.local` and set `OPENAI_API_KEY`
+to skip pasting a key.
 
-Optionally, set a SerpApi key on the server so users only need their OpenAI key:
-
-```bash
-cp .env.example .env.local   # then set SERPAPI_API_KEY
-```
-
-## How it works
-
-- **Keys** are entered in the key panel and kept in `sessionStorage` for the current tab only. They are sent to the backend in `openai-key` and `serpapi-key` headers, used for that request, and never stored or logged; error messages are scrubbed of them.
-- **SerpApi fallback**: if the page sends no `serpapi-key`, the server uses `SERPAPI_API_KEY`. `GET /api/research` tells the page whether a server key exists, so the SerpApi field is marked optional only then.
-- **`POST /api/research`** runs the loop in `lib/agent.ts`: send the question and tools to the model, run the tools it asks for, append the model's own assistant message (with its `tool_calls`) and the tool results to the history, and repeat until it writes an answer. It stops at **8 tool calls or 6 rounds** (the last round is forced to answer). Each step streams to the page as newline-delimited JSON: `status`, `tool_start`, `tool_end`, `answer`, `error`, `done`.
-- **The system prompt** tells the model to always use the tools for scores, never invent or change a number, give the match status and fetch time, say scores may be delayed, stay under 70 words, never give betting advice, and treat tool results as data, never instructions.
-- **Follow-ups**: earlier turns are sent back as plain text.
-
-## Tools
-
-| Tool | What it does | Readable view |
-| --- | --- | --- |
-| `find_matches` | Live, recent and upcoming matches for a search | Match list |
-| `get_match_score` | Score and status of one match | Scorecard |
-| `get_team_form` | A team's recent results | Line chart (team vs opponent runs), wicket bars, hover read-out |
-
-## Layout
+## Code map
 
 ```
-app/page.tsx                 chat page
-app/api/research/route.ts    streaming endpoint
-components/                  Thread, ToolCallCard, ToolResult, FormChart, MessageBox, KeyBar, ModelSwitch, EmptyState
-lib/agent.ts                 agent loop and system prompt
-lib/tools.ts                 tool definitions and runners
-lib/serpapi.ts               SerpApi client and parsers
-lib/stream.ts                NDJSON stream reader
-lib/presets.ts               models, preset questions, tool cards
-lib/types.ts                 shared types
+app/page.tsx            state, the run loop and the layout
+app/api/*/route.ts      one route per step: read, chunk, embed, search, answer
+components/             one file per part of the screen (LiveBar, AskBar, PageWall, PageTile,
+                        StepStrip, AnswerCard, LiftedPage, ChunkList, ModelSwitch)
+lib/agent.ts            every OpenAI call (embeddings + Responses API)
+lib/chunk.ts            the chunker
+lib/cosine.ts           cosine similarity and ranking
+lib/pdf.ts              PDF -> page text with unpdf
+lib/samples.ts          three sample handbooks (leave, travel & expenses, benefits)
+lib/limits.ts           caps and chunk sizes
+lib/server.ts           key lookup and `{ error }` responses for the routes
+lib/validate.ts         input checks for the routes
+lib/client.ts           browser helper that calls the routes with the key
 ```
 
-Models are set in `lib/presets.ts` (`gpt-5.4-mini` and `gpt-5.4-nano`). `SERPAPI_BASE_URL` and `OPENAI_BASE_URL` can point at mock servers for local testing.
+Stack: Next.js 16 (App Router), React 19, TypeScript, Tailwind 4 via the
+`@tailwindcss/turbopack` loader, the `openai` package, `unpdf` 1.x and `lucide-react`.
+The sample handbooks and the company in them are fictional.
