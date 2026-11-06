@@ -3,12 +3,15 @@ import type { FormGame, Match, Snippet, TeamLine } from "./types";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-export async function serpSearch(q: string, signal?: AbortSignal): Promise<Json> {
-  const key = process.env.SERPAPI_API_KEY;
-  if (!key) throw new Error("SERPAPI_API_KEY is not set on the server.");
+export async function serpSearch(q: string, key: string, signal?: AbortSignal): Promise<Json> {
+  if (!key) throw new Error("No SerpApi key. Add one in the key bar, or set SERPAPI_API_KEY on the server.");
   const url = new URL("/search.json", process.env.SERPAPI_BASE_URL ?? "https://serpapi.com");
   url.search = new URLSearchParams({ engine: "google", q, hl: "en", gl: "uk", api_key: key }).toString();
-  const res = await fetch(url, { signal, cache: "no-store" });
+  // Never let the request URL (which holds the key) end up in an error message.
+  const res = await fetch(url, { signal, cache: "no-store" }).catch((e) => {
+    if (signal?.aborted) throw e;
+    throw new Error("Could not reach SerpApi.");
+  });
   const body = (await res.json().catch(() => ({}))) as Json;
   if (!res.ok || body.error) throw new Error(`SerpApi: ${body.error ?? res.statusText}`);
   return body;

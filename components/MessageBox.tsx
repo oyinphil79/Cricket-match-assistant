@@ -27,7 +27,7 @@ export default function MessageBox({ busy, disabled, onSend, onStop }: Props) {
         ref={ref} rows={1} value={text} disabled={disabled}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
-        placeholder={disabled ? "Add your OpenAI key above to start" : "Ask about a match, a score or a team's form…"}
+        placeholder={disabled ? "Add your API keys above to start" : "Ask about a match, a score or a team's form…"}
         className="max-h-44 min-h-9 flex-1 resize-none bg-transparent py-2 text-sm outline-none placeholder:text-neutral-400"
       />
       {busy ? (

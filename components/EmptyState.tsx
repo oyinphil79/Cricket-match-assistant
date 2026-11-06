@@ -15,7 +15,7 @@ export default function EmptyState({ onPick, disabled }: { onPick: (q: string) =
       </div>
       <div className="flex flex-wrap justify-center gap-2">
         {PRESETS.map((p) => (
-          <button key={p.label} disabled={disabled} title={disabled ? "Add your OpenAI key first" : undefined} onClick={() => onPick(p.question)} className="pill disabled:opacity-50 border border-black/5 bg-white text-neutral-700 shadow-sm hover:border-black/15">
+          <button key={p.label} disabled={disabled} title={disabled ? "Add your API keys first" : undefined} onClick={() => onPick(p.question)} className="pill disabled:opacity-50 border border-black/5 bg-white text-neutral-700 shadow-sm hover:border-black/15">
             <span className={`size-1.5 rounded-full ${p.dot}`} />
             {p.label}
           </button>

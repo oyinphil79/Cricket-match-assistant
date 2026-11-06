@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import EmptyState from "@/components/EmptyState";
-import KeyBar from "@/components/KeyBar";
+import KeyBar, { type Keys } from "@/components/KeyBar";
 import MessageBox from "@/components/MessageBox";
 import ModelSwitch from "@/components/ModelSwitch";
 import Thread from "@/components/Thread";
@@ -10,7 +10,7 @@ import { DEFAULT_MODEL, type ModelId } from "@/lib/presets";
 import { readEvents } from "@/lib/stream";
 import type { AssistantMessage, ChatMessage, HistoryTurn, StreamEvent } from "@/lib/types";
 
-const KEY = "openai-key";
+const STORE = { openai: "openai-key", serpapi: "serpapi-key" } as const;
 const uid = () => Math.random().toString(36).slice(2);
 
 function apply(m: AssistantMessage, e: StreamEvent): AssistantMessage {
@@ -25,26 +25,37 @@ function apply(m: AssistantMessage, e: StreamEvent): AssistantMessage {
 }
 
 export default function Page() {
-  const [apiKey, setApiKey] = useState("");
+  const [keys, setKeys] = useState<Keys>({ openai: "", serpapi: "" });
+  const [serpOnServer, setSerpOnServer] = useState(false);
   const [model, setModel] = useState<ModelId>(DEFAULT_MODEL);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [busy, setBusy] = useState(false);
   const abort = useRef<AbortController | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { try { setApiKey(sessionStorage.getItem(KEY) ?? ""); } catch { /* storage blocked */ } }, []);
+  useEffect(() => {
+    try {
+      setKeys({ openai: sessionStorage.getItem(STORE.openai) ?? "", serpapi: sessionStorage.getItem(STORE.serpapi) ?? "" });
+    } catch { /* storage blocked */ }
+    fetch("/api/research").then((r) => r.json()).then((d) => setSerpOnServer(Boolean(d?.serpapiOnServer))).catch(() => {});
+  }, []);
   useEffect(() => { bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" }); }, [messages]);
 
-  const saveKey = (k: string) => {
-    setApiKey(k);
-    try { if (k) sessionStorage.setItem(KEY, k); else sessionStorage.removeItem(KEY); } catch { /* storage blocked */ }
+  const ready = Boolean(keys.openai && (keys.serpapi || serpOnServer));
+  const saveKeys = (k: Keys) => {
+    setKeys(k);
+    try {
+      for (const name of ["openai", "serpapi"] as const) {
+        if (k[name]) sessionStorage.setItem(STORE[name], k[name]); else sessionStorage.removeItem(STORE[name]);
+      }
+    } catch { /* storage blocked */ }
   };
 
   const update = (id: string, fn: (m: AssistantMessage) => AssistantMessage) =>
     setMessages((all) => all.map((m) => (m.id === id && m.role === "assistant" ? fn(m) : m)));
 
   async function send(text: string) {
-    if (busy || !apiKey) return;
+    if (busy || !ready) return;
     const history: HistoryTurn[] = messages.flatMap((m): HistoryTurn[] =>
       m.role === "user" ? [{ role: "user", content: m.text }] : m.answer ? [{ role: "assistant", content: m.answer }] : []);
     const id = uid();
@@ -55,7 +66,11 @@ export default function Page() {
     try {
       const res = await fetch("/api/research", {
         method: "POST", signal: ctrl.signal,
-        headers: { "Content-Type": "application/json", "openai-key": apiKey },
+        headers: {
+          "Content-Type": "application/json",
+          "openai-key": keys.openai,
+          ...(keys.serpapi ? { "serpapi-key": keys.serpapi } : {}),
+        },
         body: JSON.stringify({ question: text, model, history }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => null))?.error ?? `Request failed (${res.status})`);
@@ -86,13 +101,13 @@ export default function Page() {
           </button>
         </div>
       </header>
-      <KeyBar apiKey={apiKey} onChange={saveKey} />
+      <KeyBar keys={keys} serpOnServer={serpOnServer} onChange={saveKeys} />
       <section className="flex-1 pb-4">
-        {messages.length === 0 ? <EmptyState onPick={send} disabled={!apiKey} /> : <Thread messages={messages} />}
+        {messages.length === 0 ? <EmptyState onPick={send} disabled={!ready} /> : <Thread messages={messages} />}
         <div ref={bottom} />
       </section>
       <footer className="sticky bottom-0 bg-gradient-to-t from-page via-page to-transparent pb-5 pt-6">
-        <MessageBox busy={busy} disabled={!apiKey} onSend={send} onStop={() => abort.current?.abort()} />
+        <MessageBox busy={busy} disabled={!ready} onSend={send} onStop={() => abort.current?.abort()} />
         <p className="mt-2 text-center text-[11px] text-neutral-400">Scores come from live search results and may be delayed. No betting advice.</p>
       </footer>
     </main>

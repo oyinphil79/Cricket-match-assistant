@@ -22,12 +22,12 @@ export const TOOLS: ChatCompletionTool[] = [
 type Args = Record<string, unknown>;
 const text = (v: unknown, fallback = "") => (typeof v === "string" ? v.trim().slice(0, 120) : fallback);
 
-export async function runTool(name: string, args: Args, signal?: AbortSignal): Promise<ToolResult> {
+export async function runTool(name: string, args: Args, serpKey: string, signal?: AbortSignal): Promise<ToolResult> {
   const fetched_at = new Date().toISOString();
 
   if (name === "find_matches") {
     const query = text(args.query, "live cricket score") || "live cricket score";
-    const body = await serpSearch(query, signal);
+    const body = await serpSearch(query, serpKey, signal);
     return { kind: "matches", query, fetched_at, source_url: googleUrl(query), matches: parseMatches(body).slice(0, 8), snippets: parseSnippets(body, 3) };
   }
 
@@ -35,7 +35,7 @@ export async function runTool(name: string, args: Args, signal?: AbortSignal): P
     const teams = text(args.teams);
     if (!teams) throw new Error("Missing 'teams'.");
     const query = [teams, text(args.format), "cricket score"].filter(Boolean).join(" ");
-    const body = await serpSearch(query, signal);
+    const body = await serpSearch(query, serpKey, signal);
     return { kind: "score", query, fetched_at, source_url: googleUrl(query), match: parseMatches(body)[0] ?? null, snippets: parseSnippets(body, 3) };
   }
 
@@ -44,7 +44,7 @@ export async function runTool(name: string, args: Args, signal?: AbortSignal): P
     if (!team) throw new Error("Missing 'team'.");
     const limit = Math.min(10, Math.max(1, Number(args.limit) || 6));
     const query = `${team} cricket team results`;
-    const body = await serpSearch(query, signal);
+    const body = await serpSearch(query, serpKey, signal);
     const games = toForm(parseMatches(body), team).slice(0, limit);
     return { kind: "form", team, query, fetched_at, source_url: googleUrl(query), games, snippets: games.length ? [] : parseSnippets(body, 3) };
   }
